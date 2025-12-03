@@ -8,6 +8,8 @@ local RaycastUtility = require(ReplicatedStorage.Shared.RaycastUtility)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local BlockedHumanoidStates = require(ReplicatedStorage.Shared.BlockedHumanoidStates)
 local Replion = require(ReplicatedStorage.Packages.Replion)
+local PlayerStatsUtility = require(ReplicatedStorage.Shared.PlayerStatsUtility)
+local ItemUtility = require(ReplicatedStorage.Shared.ItemUtility)
 
 local chargeRemote = Net:RemoteFunction("ChargeFishingRod")
 local startRemote = Net:RemoteFunction("RequestFishingMinigameStarted")
@@ -25,6 +27,8 @@ AutoFishing._running = false
 AutoFishing._thread = nil
 AutoFishing._lastCatch = 0
 AutoFishing._data = nil
+AutoFishing._rodInfo = nil
+AutoFishing._chargeStart = 0
 
 local function getCharacter()
     return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -50,6 +54,50 @@ function AutoFishing:_getData()
         self._data = data
         return data
     end
+end
+
+function AutoFishing:_resolveEquippedRod(data)
+    data = data or self:_getData()
+    if not data then
+        self._rodInfo = nil
+        return
+    end
+    local equippedId = data:GetExpect("EquippedId")
+    if type(equippedId) ~= "string" or equippedId == "" then
+        self._rodInfo = nil
+        return
+    end
+    if self._rodInfo and self._rodInfo.uuid == equippedId then
+        return self._rodInfo.data
+    end
+    local ok, item, container = pcall(function()
+        return PlayerStatsUtility:GetItemFromInventory(data, function(entry)
+            return entry.UUID == equippedId
+        end)
+    end)
+    if not ok then
+        warn("[AutoFishing] Failed to read inventory:", item)
+        self._rodInfo = nil
+        return
+    end
+    if not item then
+        self._rodInfo = nil
+        return
+    end
+    local category = "Items"
+    if container and container.Category then
+        category = container.Category
+    end
+    local itemData = ItemUtility.GetItemDataFromItemType(category, item.Id)
+    if not itemData or itemData.Data.Type ~= "Fishing Rods" then
+        self._rodInfo = nil
+        return
+    end
+    self._rodInfo = {
+        uuid = equippedId,
+        data = itemData,
+    }
+    return itemData
 end
 
 function AutoFishing:_hasUnlockedPath(pathName)
@@ -87,6 +135,19 @@ function AutoFishing:_characterCanFish()
     if humanoid.SeatPart then
         return false, "Sitting"
     end
+    if LocalPlayer:GetAttribute("Loading") then
+        return false, "Player still loading"
+    end
+    local data = self:_getData()
+    if not data then
+        return false, "Player data unavailable"
+    end
+    if Constants.MaxInventorySize <= Constants:CountInventorySize(data) then
+        return false, "Inventory full"
+    end
+    if not self:_resolveEquippedRod(data) then
+        return false, "No fishing rod equipped"
+    end
     local elapsed = workspace:GetServerTimeNow() - self._lastCatch
     if elapsed < Constants.FishingCooldownTime then
         return false, "Fishing cooldown"
@@ -104,6 +165,11 @@ function AutoFishing:_chargeRod()
     end
     if not accepted then
         return false, serverTime or "Charge rejected"
+    end
+    if typeof(serverTime) == "number" then
+        self._chargeStart = serverTime
+    else
+        self._chargeStart = now
     end
     return true
 end

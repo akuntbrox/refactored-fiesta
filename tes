@@ -1,0 +1,265 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+local Net = require(ReplicatedStorage.Packages.Net)
+local RaycastUtility = require(ReplicatedStorage.Shared.RaycastUtility)
+local Constants = require(ReplicatedStorage.Shared.Constants)
+local BlockedHumanoidStates = require(ReplicatedStorage.Shared.BlockedHumanoidStates)
+local Replion = require(ReplicatedStorage.Packages.Replion)
+
+local chargeRemote = Net:RemoteFunction("ChargeFishingRod")
+local startRemote = Net:RemoteFunction("RequestFishingMinigameStarted")
+local completeRemote = Net:RemoteEvent("FishingCompleted")
+
+local AutoFishing = {}
+AutoFishing.Settings = {
+    ChargeDelay = 0.15,
+    Power = 1,
+    FailDelay = 0.75,
+    SuccessDelay = Constants.FishingCooldownTime + 0.2,
+}
+
+AutoFishing._running = false
+AutoFishing._thread = nil
+AutoFishing._lastCatch = 0
+AutoFishing._data = nil
+
+local function getCharacter()
+    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+end
+
+local function buildRaycastParams()
+    local params = RaycastParams.new()
+    params.IgnoreWater = true
+    params.RespectCanCollide = false
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = RaycastUtility:getFilteredTargets(LocalPlayer)
+    return params
+end
+
+function AutoFishing:_getData()
+    if self._data and not self._data.Destroyed then
+        return self._data
+    end
+    local ok, data = pcall(function()
+        return Replion.Client:WaitReplion("Data")
+    end)
+    if ok then
+        self._data = data
+        return data
+    end
+end
+
+function AutoFishing:_hasUnlockedPath(pathName)
+    if not pathName then
+        return true
+    end
+    local data = self:_getData()
+    if not data then
+        return false
+    end
+    local ok, value = pcall(function()
+        return data:Get(pathName)
+    end)
+    if not ok then
+        return false
+    end
+    return value == true
+end
+
+function AutoFishing:_characterCanFish()
+    local character = LocalPlayer.Character
+    if not character then
+        return false, "Character not ready"
+    end
+    local humanoid = character:FindFirstChildWhichIsA("Humanoid")
+    if not humanoid then
+        return false, "Missing humanoid"
+    end
+    if table.find(BlockedHumanoidStates.Fishing, humanoid:GetState()) then
+        return false, "Humanoid state blocked"
+    end
+    if humanoid.FloorMaterial == Enum.Material.Water then
+        return false, "Standing in water"
+    end
+    if humanoid.SeatPart then
+        return false, "Sitting"
+    end
+    local elapsed = workspace:GetServerTimeNow() - self._lastCatch
+    if elapsed < Constants.FishingCooldownTime then
+        return false, "Fishing cooldown"
+    end
+    return true
+end
+
+function AutoFishing:_chargeRod()
+    local now = workspace:GetServerTimeNow()
+    local ok, accepted, serverTime = pcall(function()
+        return chargeRemote:InvokeServer(nil, nil, nil, now)
+    end)
+    if not ok then
+        return false, accepted
+    end
+    if not accepted then
+        return false, serverTime or "Charge rejected"
+    end
+    return true
+end
+
+function AutoFishing:_raycast(power)
+    local character = getCharacter()
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return nil, "Missing HumanoidRootPart"
+    end
+    local origin = root.CFrame.Position + root.CFrame.LookVector * (power * 15 + 10)
+    local result = workspace:Raycast(origin, Vector3.new(0, -Constants.FishingDistance, 0), buildRaycastParams())
+    if not result or not result.Instance then
+        return nil, "No valid fishing spot"
+    end
+    local zone = result.Instance:GetAttribute("EligiblePath")
+    if zone and not self:_hasUnlockedPath(zone) then
+        return nil, "Zone is locked"
+    end
+    return result
+end
+
+function AutoFishing:_castOnce()
+    local canFish, reason = self:_characterCanFish()
+    if not canFish then
+        return false, reason
+    end
+
+    local charged, chargeErr = self:_chargeRod()
+    if not charged then
+        return false, chargeErr or "Failed to charge"
+    end
+
+    task.wait(self.Settings.ChargeDelay)
+
+    local rayResult, rayError = self:_raycast(self.Settings.Power)
+    if not rayResult then
+        return false, rayError
+    end
+
+    local now = workspace:GetServerTimeNow()
+    local ok, started, response = pcall(function()
+        return startRemote:InvokeServer(rayResult.Position.Y, self.Settings.Power, now)
+    end)
+    if not ok then
+        return false, started
+    end
+    if not started then
+        return false, response or "Server rejected fishing request"
+    end
+
+    completeRemote:FireServer()
+    self._lastCatch = workspace:GetServerTimeNow()
+    return true
+end
+
+function AutoFishing:_loop()
+    while self._running do
+        local success, err = self:_castOnce()
+        if not success then
+            warn("[AutoFishing]", err)
+            task.wait(self.Settings.FailDelay)
+        else
+            task.wait(self.Settings.SuccessDelay)
+        end
+    end
+end
+
+function AutoFishing:Start()
+    if self._running then
+        return
+    end
+    self._running = true
+    self._thread = task.spawn(function()
+        while not LocalPlayer.Character do
+            LocalPlayer.CharacterAdded:Wait()
+        end
+        self:_loop()
+    end)
+end
+
+function AutoFishing:Stop()
+    if not self._running then
+        return
+    end
+    self._running = false
+    if self._thread then
+        task.cancel(self._thread)
+        self._thread = nil
+    end
+end
+
+function AutoFishing:Toggle(state)
+    if state == nil then
+        state = not self._running
+    end
+    if state then
+        self:Start()
+    else
+        self:Stop()
+    end
+end
+
+local function initRayfield()
+    local ok, Rayfield = pcall(function()
+        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+    end)
+    if not ok or not Rayfield then
+        warn("[AutoFishing] Failed to load Rayfield:", Rayfield)
+        return
+    end
+
+    local Window = Rayfield:CreateWindow({
+        Name = "FishIt",
+        LoadingTitle = "Auto Fisher",
+        LoadingSubtitle = "by Codex",
+        DisableRayfieldPrompts = true,
+        ConfigurationSaving = {
+            Enabled = true,
+            FolderName = "FishItConfigs",
+            FileName = "AutoFishing",
+        },
+    })
+
+    local Tab = Window:CreateTab("Fishing", 4483362458)
+    Tab:CreateParagraph({
+        Title = "Auto Catch",
+        Content = "Toggle below to auto cast instantly. Minigame is skipped.",
+    })
+
+    local toggle = Tab:CreateToggle({
+        Name = "Auto Fishing",
+        CurrentValue = false,
+        Flag = "FishIt_AutoFishing_Toggle",
+        Callback = function(value)
+            AutoFishing:Toggle(value)
+        end,
+    })
+
+    Rayfield:LoadConfiguration()
+    task.defer(function()
+        local flags = Rayfield.Flags
+        if not flags then
+            return
+        end
+        local saved = flags["FishIt_AutoFishing_Toggle"]
+        if saved and typeof(saved.CurrentValue) == "boolean" then
+            toggle:Set(saved.CurrentValue)
+        end
+    end)
+end
+
+task.spawn(initRayfield)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    AutoFishing._lastCatch = 0
+end)
+
+return AutoFishing

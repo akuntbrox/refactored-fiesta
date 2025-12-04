@@ -14,6 +14,7 @@ local ItemUtility = require(ReplicatedStorage.Shared.ItemUtility)
 local chargeRemote = Net:RemoteFunction("ChargeFishingRod")
 local startRemote = Net:RemoteFunction("RequestFishingMinigameStarted")
 local completeRemote = Net:RemoteEvent("FishingCompleted")
+local fishCaughtRemote = Net:RemoteEvent("FishCaught")
 
 local AutoFishing = {}
 AutoFishing.Settings = {
@@ -21,6 +22,9 @@ AutoFishing.Settings = {
     Power = 1,
     FailDelay = 0.75,
     SuccessDelay = Constants.FishingCooldownTime + 0.2,
+    CompleteAttempts = 10,
+    CompleteRetryDelay = 0.2,
+    CompleteCheckStep = 0.05,
 }
 
 AutoFishing._running = false
@@ -29,6 +33,7 @@ AutoFishing._lastCatch = 0
 AutoFishing._data = nil
 AutoFishing._rodInfo = nil
 AutoFishing._chargeStart = 0
+AutoFishing._waitingForCatch = false
 
 local function getCharacter()
     return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -221,8 +226,10 @@ function AutoFishing:_castOnce()
         return false, response or "Server rejected fishing request"
     end
 
-    completeRemote:FireServer()
-    self._lastCatch = workspace:GetServerTimeNow()
+    local caught, catchErr = self:_completeCatch()
+    if not caught then
+        return false, catchErr
+    end
     return true
 end
 
@@ -256,6 +263,7 @@ function AutoFishing:Stop()
         return
     end
     self._running = false
+    self._waitingForCatch = false
     if self._thread then
         task.cancel(self._thread)
         self._thread = nil
@@ -271,6 +279,27 @@ function AutoFishing:Toggle(state)
     else
         self:Stop()
     end
+end
+
+function AutoFishing:_completeCatch()
+    self._waitingForCatch = true
+    for attempt = 1, self.Settings.CompleteAttempts do
+        completeRemote:FireServer()
+        local waited = 0
+        while waited < self.Settings.CompleteRetryDelay do
+            if not self._waitingForCatch then
+                return true
+            end
+            local step = math.min(self.Settings.CompleteCheckStep, self.Settings.CompleteRetryDelay - waited)
+            task.wait(step)
+            waited += step
+        end
+        if not self._waitingForCatch then
+            return true
+        end
+    end
+    self._waitingForCatch = false
+    return false, "Fish completion timed out"
 end
 
 local function initRayfield()
@@ -321,6 +350,11 @@ local function initRayfield()
         end
     end)
 end
+
+fishCaughtRemote.OnClientEvent:Connect(function()
+    AutoFishing._waitingForCatch = false
+    AutoFishing._lastCatch = workspace:GetServerTimeNow()
+end)
 
 task.spawn(initRayfield)
 

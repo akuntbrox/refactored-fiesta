@@ -33,6 +33,7 @@ AutoFishing._data = nil
 AutoFishing._rodInfo = nil
 AutoFishing._chargeStart = 0
 AutoFishing._waitingForCatch = false
+AutoFishing._lastCatchInfo = nil
 
 local function getCharacter()
     return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -298,6 +299,39 @@ function AutoFishing:_completeCatch()
     return self._running, "Fish completion cancelled"
 end
 
+local function resolveFishNameAndWeight(itemId, catchInfo)
+    local fishName = "Unknown fish"
+    local ok, itemData = pcall(function()
+        return ItemUtility:GetItemData(itemId)
+    end)
+    if ok and itemData and itemData.Data and itemData.Data.Name then
+        fishName = itemData.Data.Name
+    end
+
+    local weightText = "?"
+    if type(catchInfo) == "table" then
+        if catchInfo.WeightText then
+            weightText = catchInfo.WeightText
+        elseif catchInfo.Weight then
+            local decimal = tonumber(catchInfo.Weight)
+            if decimal then
+                weightText = string.format("%.2f", decimal)
+            end
+        elseif catchInfo.WeightValue then
+            local decimal = tonumber(catchInfo.WeightValue)
+            if decimal then
+                weightText = string.format("%.2f", decimal)
+            end
+        end
+    elseif type(catchInfo) == "number" then
+        weightText = string.format("%.2f", catchInfo)
+    elseif type(catchInfo) == "string" and catchInfo ~= "" then
+        weightText = catchInfo
+    end
+
+    return fishName, weightText
+end
+
 local function initRayfield()
     local ok, Rayfield = pcall(function()
         return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
@@ -347,9 +381,15 @@ local function initRayfield()
     end)
 end
 
-fishCaughtRemote.OnClientEvent:Connect(function()
+fishCaughtRemote.OnClientEvent:Connect(function(...)
     AutoFishing._waitingForCatch = false
     AutoFishing._lastCatch = workspace:GetServerTimeNow()
+    local args = table.pack(...)
+    AutoFishing._lastCatchInfo = args
+    local itemId = args[2]
+    local catchDetails = args[3]
+    local fishName, weightText = resolveFishNameAndWeight(itemId, catchDetails)
+    print(string.format("[AutoFishing] Caught %s (%s)", fishName, weightText))
 end)
 
 task.spawn(initRayfield)

@@ -215,9 +215,9 @@ function AutoFishing:_castOnce()
         return false, rayError
     end
 
-    local now = workspace:GetServerTimeNow()
+    local timestamp = self._chargeStart or workspace:GetServerTimeNow()
     local ok, started, response = pcall(function()
-        return startRemote:InvokeServer(rayResult.Position.Y, self.Settings.Power, now)
+        return startRemote:InvokeServer(rayResult.Position.Y, self.Settings.Power, timestamp)
     end)
     if not ok then
         return false, started

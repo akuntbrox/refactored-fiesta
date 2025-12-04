@@ -22,8 +22,12 @@ AutoFishing.Settings = {
     Power = 1,
     FailDelay = 0.75,
     SuccessDelay = Constants.FishingCooldownTime + 0.2,
-    CompleteRetryDelay = 0.2,
+    DefaultCompleteDelay = 1.2,
+    CompleteRetryDelay = 0.35,
     CompleteCheckStep = 0.05,
+    MinCompleteDelay = 0.25,
+    MaxCompleteDelay = 1.8,
+    WindupDelayScale = 0.3,
 }
 
 AutoFishing._running = false
@@ -34,6 +38,12 @@ AutoFishing._rodInfo = nil
 AutoFishing._chargeStart = 0
 AutoFishing._waitingForCatch = false
 AutoFishing._lastCatchInfo = nil
+
+AutoFishing.RodDelays = {
+    ["Starter Rod"] = 1.35,
+    ["Advanced Rod"] = 1.05,
+    ["Pro Rod"] = 0.9,
+}
 
 local function getCharacter()
     return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -281,22 +291,50 @@ function AutoFishing:Toggle(state)
     end
 end
 
-function AutoFishing:_completeCatch()
-    self._waitingForCatch = true
-    while self._waitingForCatch and self._running do
-        completeRemote:FireServer()
-        local waited = 0
-        while waited < self.Settings.CompleteRetryDelay do
-            if not self._waitingForCatch then
-                return true
+function AutoFishing:_getCompletionDelay()
+    local rod = self._rodInfo and self._rodInfo.data
+    if rod then
+        local data = rod.Data or {}
+        if type(data.AutoCatchDelay) == "number" then
+            return data.AutoCatchDelay
+        end
+        local rodName = data.Name
+        if rodName then
+            local configured = self.RodDelays[rodName]
+            if type(configured) == "number" then
+                return configured
             end
-            local step = math.min(self.Settings.CompleteCheckStep, self.Settings.CompleteRetryDelay - waited)
-            task.wait(step)
-            waited += step
+        end
+        local windup = rod.Windup or data.Windup
+        if typeof(windup) == "NumberRange" then
+            local avg = (windup.Min + windup.Max) / 2
+            local scaled = avg * (self.Settings.WindupDelayScale or 0.3)
+            local minDelay = self.Settings.MinCompleteDelay or 0
+            local maxDelay = self.Settings.MaxCompleteDelay or scaled
+            return math.clamp(scaled, minDelay, maxDelay)
         end
     end
+    return self.Settings.DefaultCompleteDelay
+end
+
+function AutoFishing:_completeCatch()
+    local delay = self:_getCompletionDelay()
+    if delay > 0 then
+        task.wait(delay)
+    end
+    self._waitingForCatch = true
+    completeRemote:FireServer()
+    local waited = 0
+    while waited < self.Settings.CompleteRetryDelay do
+        if not self._waitingForCatch then
+            return true
+        end
+        local step = math.min(self.Settings.CompleteCheckStep, self.Settings.CompleteRetryDelay - waited)
+        task.wait(step)
+        waited += step
+    end
     self._waitingForCatch = false
-    return self._running, "Fish completion cancelled"
+    return false, "Fish completion timed out"
 end
 
 local function resolveFishNameAndWeight(itemId, catchInfo)
@@ -367,6 +405,71 @@ local function initRayfield()
             AutoFishing:Toggle(value)
         end,
     })
+    local sliderConfigs = {
+        {
+            Name = "Charge Delay",
+            Range = {0, 1},
+            Increment = 0.01,
+            Suffix = " s",
+            Flag = "FishIt_ChargeDelay",
+            SettingKey = "ChargeDelay",
+        },
+        {
+            Name = "Cast Power",
+            Range = {0.1, 1},
+            Increment = 0.01,
+            Suffix = " power",
+            Flag = "FishIt_Power",
+            SettingKey = "Power",
+        },
+        {
+            Name = "Default Catch Delay",
+            Range = {0.2, 2},
+            Increment = 0.01,
+            Suffix = " s",
+            Flag = "FishIt_DefaultCompleteDelay",
+            SettingKey = "DefaultCompleteDelay",
+        },
+        {
+            Name = "Windup Delay Scale",
+            Range = {0.1, 0.7},
+            Increment = 0.01,
+            Suffix = "x",
+            Flag = "FishIt_WindupScale",
+            SettingKey = "WindupDelayScale",
+        },
+        {
+            Name = "Completion Confirm Wait",
+            Range = {0.1, 1},
+            Increment = 0.01,
+            Suffix = " s",
+            Flag = "FishIt_CompleteRetryDelay",
+            SettingKey = "CompleteRetryDelay",
+        },
+    }
+    local sliderRegistry = {}
+    for _, config in ipairs(sliderConfigs) do
+        AutoFishing.Settings[config.SettingKey] = math.clamp(
+            AutoFishing.Settings[config.SettingKey],
+            config.Range[1],
+            config.Range[2]
+        )
+        local slider = Tab:CreateSlider({
+            Name = config.Name,
+            Range = config.Range,
+            Increment = config.Increment,
+            Suffix = config.Suffix,
+            CurrentValue = AutoFishing.Settings[config.SettingKey],
+            Flag = config.Flag,
+            Callback = function(value)
+                AutoFishing.Settings[config.SettingKey] = value
+            end,
+        })
+        sliderRegistry[config.Flag] = {
+            Slider = slider,
+            Config = config,
+        }
+    end
 
     Rayfield:LoadConfiguration()
     task.defer(function()
@@ -377,6 +480,16 @@ local function initRayfield()
         local saved = flags["FishIt_AutoFishing_Toggle"]
         if saved and typeof(saved.CurrentValue) == "boolean" then
             toggle:Set(saved.CurrentValue)
+        end
+        for flagName, pack in pairs(sliderRegistry) do
+            local savedSlider = flags[flagName]
+            if savedSlider and typeof(savedSlider.CurrentValue) == "number" then
+                local min = pack.Config.Range[1]
+                local max = pack.Config.Range[2]
+                local value = math.clamp(savedSlider.CurrentValue, min, max)
+                AutoFishing.Settings[pack.Config.SettingKey] = value
+                pack.Slider:Set(value)
+            end
         end
     end)
 end

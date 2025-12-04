@@ -22,7 +22,6 @@ AutoFishing.Settings = {
     Power = 1,
     FailDelay = 0.75,
     SuccessDelay = Constants.FishingCooldownTime + 0.2,
-    CompleteAttempts = 10,
     CompleteRetryDelay = 0.2,
     CompleteCheckStep = 0.05,
 }
@@ -283,7 +282,7 @@ end
 
 function AutoFishing:_completeCatch()
     self._waitingForCatch = true
-    for attempt = 1, self.Settings.CompleteAttempts do
+    while self._waitingForCatch and self._running do
         completeRemote:FireServer()
         local waited = 0
         while waited < self.Settings.CompleteRetryDelay do
@@ -294,12 +293,9 @@ function AutoFishing:_completeCatch()
             task.wait(step)
             waited += step
         end
-        if not self._waitingForCatch then
-            return true
-        end
     end
     self._waitingForCatch = false
-    return false, "Fish completion timed out"
+    return self._running, "Fish completion cancelled"
 end
 
 local function initRayfield()
